@@ -33,7 +33,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   PYTHON_VERSION: "3.13"
   RUST_TOOLCHAIN: "1.78.0"
-  VULKAN_SDK_VERSION: "1.2.182.0"
   SCCACHE_VERSION: "v0.7.4"
 
 # ─── Jobs ─────────────────────────────────────────────────────────────────────
@@ -165,6 +164,7 @@ jobs:
   wheel-linux:
     name: Wheel (Linux x64)
     runs-on: ubuntu-latest
+    if: hashFiles('CMakeLists.txt') != ''
     needs: [test, docker]        # depends on docker so we can pull the image
     permissions:
       contents: read
@@ -234,6 +234,7 @@ jobs:
   wheel-windows:
     name: Wheel (Windows x64)
     runs-on: windows-latest
+    if: hashFiles('CMakeLists.txt') != ''
     needs: test
     permissions:
       contents: read
@@ -275,9 +276,8 @@ jobs:
           restore-keys: |
             ccache-windows-
 
-      - name: Install Vulkan SDK
-        run: choco install vulkan-sdk --version=${{ env.VULKAN_SDK_VERSION }} -y --no-progress --allow-downgrade
-
+      # Windows: build CPU-only (no Vulkan). Chocolatey vulkan-sdk download URLs are 404;
+      # Linux/Docker keep USE_VULKAN ON via config.cmake.
       - name: Build native libraries (official guide)
         shell: pwsh
         run: |
@@ -288,11 +288,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item docker\config.cmake build\config.cmake
 
-          # Step 2: Configure and build
+          # Step 2: Configure and build (USE_VULKAN=OFF: no Vulkan SDK on Windows CI)
           $Env:CMAKE_C_COMPILER_LAUNCHER = "sccache"
           $Env:CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=OFF
           cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
           cd ..
 
