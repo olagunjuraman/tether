@@ -67,7 +67,10 @@ RUN groupadd --gid ${USER_GID} ${USER_NAME} \
 # ── Rust toolchain (required by tokenizers-cpp) ──────────────────────────────
 # RUSTUP_HOME: shared read-only location for the toolchain (rustc, cargo binary).
 # CARGO_HOME:  per-user writable location for crate registry cache and downloads.
-ENV RUSTUP_HOME="/opt/rust/rustup"
+# Re-declare ARG so it is in scope for this stage (ARGs before FROM are not).
+ARG RUST_TOOLCHAIN=1.78.0
+ENV RUSTUP_HOME="/opt/rust/rustup" \
+    RUST_TOOLCHAIN="${RUST_TOOLCHAIN}"
 
 # Use bash with pipefail for RUN with pipe; reset to default after
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

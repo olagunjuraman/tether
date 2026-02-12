@@ -29,7 +29,7 @@ signatures, and provenance** for supply-chain integrity.
 | Python | >= 3.9 (3.13 recommended) | Local runs outside Docker |
 | CMake | >= 3.24 | Only needed for native builds (Docker includes it) |
 | Rust / Cargo | 1.78.0 | Required by tokenizers-cpp; pinned in CI |
-| Vulkan SDK | 1.3.290.0 | Windows CI uses pinned version; CPU-only builds work without |
+| Vulkan SDK | 1.2.182.0 | Windows CI uses pinned version (Chocolatey); CPU-only builds work without |
 
 ---
 
