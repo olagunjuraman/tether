@@ -25,6 +25,7 @@ LABEL org.opencontainers.image.title="mlc-llm-dev" \
 
 # ── System packages ──────────────────────────────────────────────────────────
 # Build toolchain + Vulkan runtime/dev + dev convenience tools, in one layer.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         # Build toolchain
         build-essential \
@@ -68,11 +69,13 @@ RUN groupadd --gid ${USER_GID} ${USER_NAME} \
 # CARGO_HOME:  per-user writable location for crate registry cache and downloads.
 ENV RUSTUP_HOME="/opt/rust/rustup"
 
-RUN set -o pipefail \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | CARGO_HOME=/opt/rust/cargo sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
+# Use bash with pipefail for RUN with pipe; reset to default after
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | CARGO_HOME=/opt/rust/cargo sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
     && chmod -R a+rX /opt/rust \
     && /opt/rust/cargo/bin/rustc --version
+SHELL ["/bin/sh", "-c"]
 
 # Put cargo/rustc on PATH; set CARGO_HOME to mlc user's home (writable for crate downloads).
 ENV PATH="/opt/rust/cargo/bin:${PATH}" \
