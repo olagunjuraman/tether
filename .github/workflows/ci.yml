@@ -84,6 +84,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
+      artifact-metadata: write
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
     steps:
@@ -167,6 +169,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -234,6 +238,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
       SCCACHE_REGION: ${{ secrets.SCCACHE_REGION }}
