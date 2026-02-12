@@ -1,0 +1,10 @@
+# Minimize Docker build context — only docker/ dir is needed via COPY.
+**/.git
+**/.github
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/build
+**/dist
+**/.ccache
+*.pdf

@@ -1,0 +1,48 @@
+# Composite action: set up the common build environment.
+# Reused by test and wheel-windows jobs to stay DRY.
+#
+# IMPORTANT: The calling job MUST checkout the repo before using this action,
+# since GitHub Actions needs the repo present to resolve local action paths.
+name: Setup MLC-LLM build environment
+description: Install Python, Rust, caching, and pip build deps.
+
+inputs:
+  python-version:
+    description: Python version to install
+    default: "3.13"
+  rust-toolchain:
+    description: Rust toolchain version to install
+    default: "1.78.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+
+    - name: Cache Rust/Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '3rdparty/tokenizers-cpp/Cargo.toml') }}
+        restore-keys: cargo-${{ runner.os }}-
+
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+        restore-keys: pip-${{ runner.os }}-${{ inputs.python-version }}-
+
+    - name: Install Python build deps
+      shell: bash
+      run: python -m pip install --upgrade pip setuptools wheel pytest

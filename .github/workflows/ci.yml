@@ -1,0 +1,423 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# MLC-LLM CI/CD Pipeline
+#
+# Flow:  lint ──► test ──► docker (GHCR)
+#                      ├──► wheel-linux  ──► smoke-linux  ──► release (tag only)
+#                      └──► wheel-windows ─► smoke-windows ─┘
+#
+# - lint:          Dockerfile (hadolint) + workflow YAML (actionlint).
+# - test:          Infrastructure tests; hard gate for all downstream jobs.
+# - docker:        Build multipurpose image, push to GHCR, sign + SBOM.
+# - wheel-linux:   Build x64 wheel inside Docker image, SBOM + provenance.
+# - wheel-windows: Build x64 wheel on native Windows runner, SBOM + provenance.
+# - smoke-*:       Install wheels in clean env and import-check.
+# - release:       Upload wheels + SBOM + signatures to GitHub Release (tags only).
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:          # allow manual trigger
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: "3.13"
+  RUST_TOOLCHAIN: "1.78.0"
+  VULKAN_SDK_VERSION: "1.3.290.0"
+  SCCACHE_VERSION: "v0.7.4"
+
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. Lint ────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile
+          failure-threshold: warning
+
+      - name: Lint GitHub Actions workflow (actionlint)
+        uses: reviewdog/action-actionlint@v1
+
+  # ── 2. Test (gate) ─────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Run infrastructure tests
+        run: pytest tests/test_infra.py -v --tb=short -x
+
+  # ── 3. Docker image → GHCR ────────────────────────────────────────────────
+  docker:
+    name: Docker (GHCR)
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            RUST_TOOLCHAIN=${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          cosign sign --yes "$IMAGE"
+
+      - name: Generate image SBOM
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-image.spdx.json
+
+      - name: Upload image SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image
+          path: sbom-image.spdx.json
+
+      - name: Attest image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+  # ── 4. Wheel — Linux x64 ──────────────────────────────────────────────────
+  wheel-linux:
+    name: Wheel (Linux x64)
+    runs-on: ubuntu-latest
+    needs: [test, docker]        # depends on docker so we can pull the image
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ hashFiles('CMakeLists.txt', '**/*.cmake') }}
+          restore-keys: |
+            ccache-linux-
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build wheel in Docker
+        run: |
+          # Use the sha-tagged image (always generated by metadata-action).
+          # Fall back to local build if the image was not pushed (e.g. on PRs).
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          docker pull "$IMAGE" 2>/dev/null \
+            || docker build -f docker/Dockerfile -t "$IMAGE" \
+              --build-arg PYTHON_VERSION="${{ env.PYTHON_VERSION }}" \
+              --build-arg RUST_TOOLCHAIN="${{ env.RUST_TOOLCHAIN }}" .
+          docker run --rm \
+            -v "$PWD":/workspace \
+            "$IMAGE" build
+
+      - name: Generate wheel SBOM (Linux)
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: sbom-wheel-linux.spdx.json
+
+      - name: Upload wheel SBOM (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-wheel-linux
+          path: sbom-wheel-linux.spdx.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-x64
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Attest wheel provenance (Linux)
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*.whl
+
+  # ── 5. Wheel — Windows x64 ────────────────────────────────────────────────
+  wheel-windows:
+    name: Wheel (Windows x64)
+    runs-on: windows-latest
+    needs: test
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
+      SCCACHE_REGION: ${{ secrets.SCCACHE_REGION }}
+      SCCACHE_S3_KEY_PREFIX: mlc-llm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Enable MSVC ccache (sccache)
+        shell: pwsh
+        run: |
+          $version = "${{ env.SCCACHE_VERSION }}"
+          $dir = "sccache-$version-x86_64-pc-windows-msvc"
+          $zip = "$dir.zip"
+          $url = "https://github.com/mozilla/sccache/releases/download/$version/$zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath .
+          (Join-Path $PWD $dir) | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          "SCCACHE_DIR=$($PWD)\.ccache" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-windows-${{ hashFiles('CMakeLists.txt', '**/*.cmake') }}
+          restore-keys: |
+            ccache-windows-
+
+      - name: Install Vulkan SDK
+        run: choco install vulkan-sdk --version=${{ env.VULKAN_SDK_VERSION }} -y --no-progress --allow-downgrade
+
+      - name: Build native libraries (official guide)
+        shell: pwsh
+        run: |
+          # Follow the official MLC-LLM build-from-source guide:
+          # https://llm.mlc.ai/docs/install/mlc_llm.html#option-2-build-from-source
+          #
+          # Step 1: Place pre-generated config.cmake (equivalent to gen_cmake_config.py)
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item docker\config.cmake build\config.cmake
+
+          # Step 2: Configure and build
+          $Env:CMAKE_C_COMPILER_LAUNCHER = "sccache"
+          $Env:CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
+          cd ..
+
+      - name: Package wheel
+        shell: pwsh
+        run: |
+          # Step 3: Package as wheel (official guide uses `pip install -e .`;
+          # we produce a wheel for distribution instead).
+          cd python
+          pip wheel . --no-deps --wheel-dir $PWD\..\dist
+          cd ..
+
+      - name: Generate wheel SBOM (Windows)
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: sbom-wheel-windows.spdx.json
+
+      - name: Upload wheel SBOM (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-wheel-windows
+          path: sbom-wheel-windows.spdx.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-x64
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Attest wheel provenance (Windows)
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*.whl
+
+  # ── 6. Smoke tests ─────────────────────────────────────────────────────────
+  smoke-linux:
+    name: Smoke (Linux)
+    runs-on: ubuntu-latest
+    needs: wheel-linux
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-linux-x64
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+
+      - name: Import check
+        run: |
+          python - <<'PY'
+          import mlc_llm
+          print(mlc_llm.__version__)
+          PY
+
+  smoke-windows:
+    name: Smoke (Windows)
+    runs-on: windows-latest
+    needs: wheel-windows
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-windows-x64
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install wheel
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist\*.whl
+
+      - name: Import check
+        shell: pwsh
+        run: |
+          python -c "import mlc_llm; print(mlc_llm.__version__)"
+
+  # ── 7. Release ─────────────────────────────────────────────────────────────
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [smoke-linux, smoke-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          merge-multiple: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign wheels (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          for wheel in wheels/*.whl; do
+            cosign sign-blob --yes \
+              --output-signature "${wheel}.sig" \
+              --output-certificate "${wheel}.crt" \
+              "$wheel"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            wheels/*.whl
+            wheels/*.sig
+            wheels/*.crt
+            wheels/*.spdx.json
+            wheels/sbom-image.spdx.json
+          generate_release_notes: true
