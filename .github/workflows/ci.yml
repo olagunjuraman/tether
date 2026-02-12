@@ -55,7 +55,20 @@ jobs:
       - name: Lint GitHub Actions workflow (actionlint)
         uses: reviewdog/action-actionlint@v1
 
-  # ── 2. Test (gate) ─────────────────────────────────────────────────────────
+  # ── 2. Detect MLC-LLM source (skip wheel jobs when absent) ──────────────────
+  detect-source:
+    name: Detect MLC-LLM source
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f CMakeLists.txt ]; then echo "has_source=true" >> $GITHUB_OUTPUT; else echo "has_source=false" >> $GITHUB_OUTPUT; fi
+    outputs:
+      has_source: ${{ steps.check.outputs.has_source }}
+
+  # ── 3. Test (gate) ─────────────────────────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -74,7 +87,7 @@ jobs:
       - name: Run infrastructure tests
         run: pytest tests/test_infra.py -v --tb=short -x
 
-  # ── 3. Docker image → GHCR ────────────────────────────────────────────────
+  # ── 4. Docker image → GHCR ────────────────────────────────────────────────
   docker:
     name: Docker (GHCR)
     runs-on: ubuntu-latest
@@ -160,12 +173,12 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
-  # ── 4. Wheel — Linux x64 ──────────────────────────────────────────────────
+  # ── 5. Wheel — Linux x64 ──────────────────────────────────────────────────
   wheel-linux:
     name: Wheel (Linux x64)
     runs-on: ubuntu-latest
-    if: hashFiles('CMakeLists.txt') != ''
-    needs: [test, docker]        # depends on docker so we can pull the image
+    if: needs.detect-source.outputs.has_source == 'true'
+    needs: [test, docker, detect-source]
     permissions:
       contents: read
       id-token: write
@@ -230,12 +243,12 @@ jobs:
         with:
           subject-path: dist/*.whl
 
-  # ── 5. Wheel — Windows x64 ────────────────────────────────────────────────
+  # ── 6. Wheel — Windows x64 ────────────────────────────────────────────────
   wheel-windows:
     name: Wheel (Windows x64)
     runs-on: windows-latest
-    if: hashFiles('CMakeLists.txt') != ''
-    needs: test
+    if: needs.detect-source.outputs.has_source == 'true'
+    needs: [test, detect-source]
     permissions:
       contents: read
       id-token: write
@@ -331,7 +344,7 @@ jobs:
         with:
           subject-path: dist/*.whl
 
-  # ── 6. Smoke tests ─────────────────────────────────────────────────────────
+  # ── 7. Smoke tests ─────────────────────────────────────────────────────────
   smoke-linux:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
@@ -387,7 +400,7 @@ jobs:
         run: |
           python -c "import mlc_llm; print(mlc_llm.__version__)"
 
-  # ── 7. Release ─────────────────────────────────────────────────────────────
+  # ── 8. Release ─────────────────────────────────────────────────────────────
   release:
     name: Release
     runs-on: ubuntu-latest
