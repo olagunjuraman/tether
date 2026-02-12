@@ -68,8 +68,9 @@ RUN groupadd --gid ${USER_GID} ${USER_NAME} \
 # CARGO_HOME:  per-user writable location for crate registry cache and downloads.
 ENV RUSTUP_HOME="/opt/rust/rustup"
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | CARGO_HOME=/opt/rust/cargo sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
+RUN set -o pipefail \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | CARGO_HOME=/opt/rust/cargo sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
     && chmod -R a+rX /opt/rust \
     && /opt/rust/cargo/bin/rustc --version
 
@@ -79,9 +80,9 @@ ENV PATH="/opt/rust/cargo/bin:${PATH}" \
 
 # ── Python build tooling ─────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
-        pytest \
-        setuptools \
-        wheel
+        pytest==8.3.3 \
+        setuptools==75.6.0 \
+        wheel==0.43.0
 
 # ── ccache config (faster rebuilds in dev; host-mounted volume) ──────────────
 ENV CCACHE_DIR="/workspace/.ccache" \
@@ -89,7 +90,7 @@ ENV CCACHE_DIR="/workspace/.ccache" \
     CMAKE_CXX_COMPILER_LAUNCHER="ccache"
 
 # ── Workspace ────────────────────────────────────────────────────────────────
-RUN mkdir -p /workspace && chown ${USER_UID}:${USER_GID} /workspace
+RUN mkdir -p /workspace && chown "${USER_UID}:${USER_GID}" /workspace
 WORKDIR /workspace
 
 # ── Bake in cmake config and entrypoint ──────────────────────────────────────
